@@ -3,3 +3,4 @@ pyaudio
 numpy
 torch
 torchaudio
+requests
