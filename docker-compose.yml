@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  whisper-stt:
+    build: .
+    container_name: whisper-realtime-stt
+    devices:
+      - /dev/snd:/dev/snd  # For Linux audio access
+    volumes:
+      - .:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+    stdin_open: true
+    tty: true
