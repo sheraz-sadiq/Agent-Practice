@@ -6,7 +6,6 @@ import threading
 import queue
 import time
 import requests
-import json
 from datetime import datetime
 
 # Configuration
@@ -14,15 +13,15 @@ CHUNK = 1024
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
-RECORD_SECONDS = 5  # Process audio every 5 seconds
 SILENCE_THRESHOLD = 500  # Adjust based on your environment
+WEBHOOK_URL = "http://localhost:5678/webhook-test/sst"
+PAUSE_DURATION = 1.5  # Seconds of silence before processing speech
 
 class RealtimeSpeechToText:
-    def __init__(self, model_size="base", webhook_url=None):
+    def __init__(self, model_size="base"):
         """
         Initialize the Whisper model
         model_size options: tiny, base, small, medium, large
-        webhook_url: URL to send transcribed text (optional)
         """
         print(f"Loading Whisper {model_size} model...")
         self.model = whisper.load_model(model_size)
@@ -30,10 +29,9 @@ class RealtimeSpeechToText:
         
         self.audio_queue = queue.Queue()
         self.is_recording = False
-        self.webhook_url = webhook_url
-        
-        if self.webhook_url:
-            print(f"Webhook enabled: {self.webhook_url}\n")
+        self.is_speaking = False
+        self.speech_frames = []
+        self.silence_chunks = 0
         
     def record_audio(self):
         """Record audio from microphone"""
@@ -48,22 +46,40 @@ class RealtimeSpeechToText:
         print("* Recording started. Speak into your microphone...")
         print("* Press Ctrl+C to stop\n")
         
-        frames = []
-        frame_count = 0
-        target_frames = int(RATE / CHUNK * RECORD_SECONDS)
+        silence_chunks_threshold = int(RATE / CHUNK * PAUSE_DURATION)
         
         while self.is_recording:
             try:
                 data = stream.read(CHUNK, exception_on_overflow=False)
-                frames.append(data)
-                frame_count += 1
+                audio_np = np.frombuffer(data, dtype=np.int16)
+                audio_level = np.abs(audio_np).mean()
                 
-                # Process audio chunk every RECORD_SECONDS
-                if frame_count >= target_frames:
-                    audio_data = b''.join(frames)
-                    self.audio_queue.put(audio_data)
-                    frames = []
-                    frame_count = 0
+                # Check if there's sound above threshold
+                if audio_level > SILENCE_THRESHOLD:
+                    if not self.is_speaking:
+                        print("🎤 Speech detected...")
+                        self.is_speaking = True
+                        self.speech_frames = []
+                    
+                    self.speech_frames.append(data)
+                    self.silence_chunks = 0
+                    
+                elif self.is_speaking:
+                    # Still in speaking mode but current chunk is silent
+                    self.speech_frames.append(data)
+                    self.silence_chunks += 1
+                    
+                    # Check if silence duration reached
+                    if self.silence_chunks >= silence_chunks_threshold:
+                        # Process the accumulated speech
+                        audio_data = b''.join(self.speech_frames)
+                        self.audio_queue.put(audio_data)
+                        
+                        # Reset
+                        self.is_speaking = False
+                        self.speech_frames = []
+                        self.silence_chunks = 0
+                        print("⏸ Pause detected, processing...\n")
                     
             except Exception as e:
                 print(f"Error recording: {e}")
@@ -74,6 +90,21 @@ class RealtimeSpeechToText:
         p.terminate()
         print("* Recording stopped")
     
+    def send_to_webhook(self, text):
+        """Send transcribed text to n8n webhook"""
+        try:
+            payload = {
+                "message": text,
+                "time": datetime.now().isoformat()
+            }
+            response = requests.post(WEBHOOK_URL, json=payload, timeout=5)
+            if response.status_code == 200:
+                print(f"✓ Sent to webhook: {text}\n")
+            else:
+                print(f"✗ Webhook error: {response.status_code}\n")
+        except Exception as e:
+            print(f"✗ Failed to send to webhook: {e}\n")
+    
     def process_audio(self):
         """Process audio chunks and transcribe"""
         while self.is_recording or not self.audio_queue.empty():
@@ -83,54 +114,18 @@ class RealtimeSpeechToText:
                 # Convert bytes to numpy array
                 audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
                 
-                # Check if there's actual sound (not silence)
-                if np.abs(audio_np).mean() * 32768 > SILENCE_THRESHOLD:
-                    print("Processing audio...")
-                    
-                    # Transcribe using Whisper
-                    result = self.model.transcribe(audio_np, fp16=False, language='en')
-                    text = result['text'].strip()
-                    
-                    if text:
-                        print(f"Transcription: {text}")
-                        
-                        # Send to webhook if configured
-                        if self.webhook_url:
-                            self.send_to_webhook(text)
-                        print()
-                else:
-                    print("Silence detected, skipping...\n")
+                # Transcribe using Whisper
+                result = self.model.transcribe(audio_np, fp16=False, language='en')
+                text = result['text'].strip()
+                
+                if text:
+                    print(f"📝 Transcription: {text}")
+                    self.send_to_webhook(text)
                     
             except queue.Empty:
                 continue
             except Exception as e:
                 print(f"Error processing audio: {e}")
-    
-    def send_to_webhook(self, text):
-        """Send transcribed text to webhook"""
-        try:
-            payload = {
-                "text": text,
-                "timestamp": datetime.now().isoformat(),
-                "source": "whisper-realtime-stt"
-            }
-            
-            response = requests.post(
-                self.webhook_url,
-                json=payload,
-                headers={'Content-Type': 'application/json'},
-                timeout=5
-            )
-            
-            if response.status_code == 200:
-                print(f"✓ Sent to webhook successfully")
-            else:
-                print(f"⚠ Webhook response: {response.status_code}")
-                
-        except requests.exceptions.Timeout:
-            print(f"⚠ Webhook timeout")
-        except requests.exceptions.RequestException as e:
-            print(f"⚠ Webhook error: {e}")
     
     def start(self):
         """Start real-time transcription"""
@@ -155,16 +150,6 @@ class RealtimeSpeechToText:
             print("Done!")
 
 if __name__ == "__main__":
-    # Configure your webhook URL here (n8n, Zapier, Make.com, or any custom endpoint)
-    # Example: "https://your-n8n-instance.com/webhook/speech-to-text"
-    WEBHOOK_URL = None  # Set to your webhook URL or leave None to disable
-    
-    # Prompt for webhook URL if not set
-    if not WEBHOOK_URL:
-        webhook_input = input("Enter webhook URL (or press Enter to skip): ").strip()
-        if webhook_input:
-            WEBHOOK_URL = webhook_input
-    
     # Initialize with base model (you can change to: tiny, base, small, medium, large)
-    stt = RealtimeSpeechToText(model_size="base", webhook_url=WEBHOOK_URL)
+    stt = RealtimeSpeechToText(model_size="base")
     stt.start()
