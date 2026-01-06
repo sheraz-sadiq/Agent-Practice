@@ -87,21 +87,26 @@ class RealtimeSpeechToText:
                 if np.abs(audio_np).mean() * 32768 > SILENCE_THRESHOLD:
                     print("Processing audio...")
                     
-                    # Transcribe using Whisper")
-                        
-                        # Send to webhook if configured
-                        if self.webhook_url:
-                            self.send_to_webhook(text)
-                        print(
+                    # Transcribe using Whisper
                     result = self.model.transcribe(audio_np, fp16=False, language='en')
                     text = result['text'].strip()
                     
                     if text:
-                        print(f"Transcription: {text}\n")
+                        print(f"Transcription: {text}")
+                        
+                        # Send to webhook if configured
+                        if self.webhook_url:
+                            self.send_to_webhook(text)
+                        print()
                 else:
                     print("Silence detected, skipping...\n")
                     
-         end_to_webhook(self, text):
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Error processing audio: {e}")
+    
+    def send_to_webhook(self, text):
         """Send transcribed text to webhook"""
         try:
             payload = {
@@ -124,23 +129,8 @@ class RealtimeSpeechToText:
                 
         except requests.exceptions.Timeout:
             print(f"⚠ Webhook timeout")
-      Configure your webhook URL here (n8n, Zapier, Make.com, or any custom endpoint)
-    # Example: "https://your-n8n-instance.com/webhook/speech-to-text"
-    WEBHOOK_URL = None  # Set to your webhook URL or leave None to disable
-    
-    # Prompt for webhook URL if not set
-    if not WEBHOOK_URL:
-        webhook_input = input("Enter webhook URL (or press Enter to skip): ").strip()
-        if webhook_input:
-            WEBHOOK_URL = webhook_input
-    
-    # Initialize with base model (you can change to: tiny, base, small, medium, large)
-    stt = RealtimeSpeechToText(model_size="base", webhook_url=WEBHOOK_URL
-    
-    def s   except queue.Empty:
-                continue
-            except Exception as e:
-                print(f"Error processing audio: {e}")
+        except requests.exceptions.RequestException as e:
+            print(f"⚠ Webhook error: {e}")
     
     def start(self):
         """Start real-time transcription"""
@@ -165,6 +155,16 @@ class RealtimeSpeechToText:
             print("Done!")
 
 if __name__ == "__main__":
+    # Configure your webhook URL here (n8n, Zapier, Make.com, or any custom endpoint)
+    # Example: "https://your-n8n-instance.com/webhook/speech-to-text"
+    WEBHOOK_URL = None  # Set to your webhook URL or leave None to disable
+    
+    # Prompt for webhook URL if not set
+    if not WEBHOOK_URL:
+        webhook_input = input("Enter webhook URL (or press Enter to skip): ").strip()
+        if webhook_input:
+            WEBHOOK_URL = webhook_input
+    
     # Initialize with base model (you can change to: tiny, base, small, medium, large)
-    stt = RealtimeSpeechToText(model_size="base")
+    stt = RealtimeSpeechToText(model_size="base", webhook_url=WEBHOOK_URL)
     stt.start()
